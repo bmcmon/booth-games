@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<link rel="icon" href="data:,">
+<title>과일 받기</title>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="core.js"></script>
+<script>
+'use strict';
+// 게임 1 — 과일 받기 (01-fruit-plan.md)
+
+// ============================================================
+// 조정값 (부스에서는 여기 숫자만 바꾸면 됩니다)
+// ============================================================
+const CONFIG = {
+  duration: 60,          // 제한시간(초)
+  lives: 3,              // 폭탄에만 닳음
+  basketW: 120, basketH: 30, basketY: 480,
+  basketSpeed: 500,      // px/s
+  basketPad: 12,         // 판정을 좌우로 넓히는 양
+  itemSize: 40, itemHit: 36,
+  stages: [              // 시작 시각(초) 기준
+    { t: 0,  fall: 200, interval: 1.0, bomb: 0.10, star: 0.05 },
+    { t: 20, fall: 280, interval: 0.8, bomb: 0.15, star: 0.05 },
+    { t: 40, fall: 360, interval: 0.6, bomb: 0.20, star: 0.05 },
+  ],
+  stageBlend: 2,         // 구간 경계 앞뒤 2초 동안 낙하 속도를 서서히 바꿈 (도착 순서 뒤바뀜 방지)
+  appleRatio: 0.7,       // 과일 중 사과 비율 (나머지 바나나)
+  points: { apple: 10, banana: 10, star: 50 },
+  comboStep: 5, comboMax: 3,
+  starGrades: [300, 600, 1000],   // 결과 별점 경계
+  fairness: 0.9,         // 생성 위치 제한 계수
+  bombNoRepeatSameX: 60, // 폭탄이 직전 과일과 이 거리 안에 겹쳐 나오지 않게
+  firstSpawn: 1.5,       // 처음 1.5초는 생성 안 함
+  spawnY: -20,
+  attractAfter: 10,      // 시작 화면에서 이 시간 동안 입력이 없으면 순위표를 보여 줌
+};
+const RANK_KEY = 'booth_fruit';
+const RANK_TITLE = '과일 받기 순위';
+
+// ============================================================
+// 게임 상태 (화면과 분리 — 시뮬레이션에서도 그대로 사용)
+// ============================================================
+function stageAt(t) {
+  let s = CONFIG.stages[0];
+  for (const st of CONFIG.stages) if (t >= st.t) s = st;
+  return s;
+}
+
+// 낙하 속도: 구간 경계 앞뒤 stageBlend초 동안 선형으로 바뀜
+function fallAt(t) {
+  const S = CONFIG.stages, b = CONFIG.stageBlend;
+  for (let i = 1; i < S.length; i++) {
+    if (t < S[i].t - b) return S[i - 1].fall;
+    if (t < S[i].t + b) return lerp(S[i - 1].fall, S[i].fall, (t - (S[i].t - b)) / (2 * b));
+  }
+  return S[S.length - 1].fall;
+}
+
+const catchTopY = () => CONFIG.basketY;                        // 물체 아랫변이 여기 닿으면 받기 시작
+const catchReach = () => CONFIG.basketW / 2 + CONFIG.basketPad + CONFIG.itemHit / 2;   // 바구니 중심과 물체 중심의 최대 가로 거리
+
+function newGame() {
+  return {
+    t: 0, score: 0, lives: CONFIG.lives,
+    streak: 0, mult: 1, maxStreak: 0, caught: 0, missed: 0, bombsHit: 0,
+    bx: W / 2, items: [], spawnT: CONFIG.firstSpawn,
+    prevItem: null,   // 직전에 나온 폭탄 아닌 물체 (위치 제한 기준)
+    hurtT: 0, over: false, events: [],
+  };
+}
+
+function spawn(g) {
+  const st = stageAt(g.t);
+  const fall = fallAt(g.t);
+  const half = CONFIG.itemHit / 2;
+  const arrive = g.t + (catchTopY() - half - CONFIG.spawnY) / fall;   // 바구니에 닿는 시각
+  const prev = g.prevItem;
+
+  const r = Math.random();
+  const type = r < st.bomb ? 'bomb'
+    : r < st.bomb + st.star ? 'star'
+    : Math.random() < CONFIG.appleRatio ? 'apple' : 'banana';
+
+  // 직전 과일이 도착한 뒤 바구니가 갈 수 있는 거리 안에서만 생성
+  let x;
+  if (prev) {
+    const R = CONFIG.basketSpeed * Math.max(0, arrive - prev.arrive) * CONFIG.fairness;
+    x = clamp(prev.x + rand(-R, R), 40, W - 40);
+  } else {
+    x = rand(100, W - 100);
+  }
+  // 폭탄이 직전 과일 바로 위에 겹쳐 나오면 옆으로 밀어냄
+  if (type === 'bomb' && prev && Math.abs(x - prev.x) < CONFIG.bombNoRepeatSameX) {
+    x = clamp(x + (x < W / 2 ? 1 : -1) * CONFIG.bombNoRepeatSameX * 1.5, 40, W - 40);
+  }
+
+  const it = { type, x, y: CONFIG.spawnY, vy: fall, arrive, done: false, spin: rand(0, 6) };
+  g.items.push(it);
+  if (type !== 'bomb') g.prevItem = it;
+  return it;
+}
+
+// dir: -1 왼쪽, 0 정지, 1 오른쪽
+function stepGame(g, dt, dir) {
+  g.events.length = 0;
+  if (g.over) return;
+  g.t += dt;
+  if (g.hurtT > 0) g.hurtT -= dt;
+
+  const halfB = CONFIG.basketW / 2;
+  g.bx = clamp(g.bx + dir * CONFIG.basketSpeed * dt, halfB, W - halfB);
+
+  while (g.t >= g.spawnT && g.t < CONFIG.duration) {
+    spawn(g);
+    g.spawnT += stageAt(g.t).interval;
+  }
+
+  const half = CONFIG.itemHit / 2, top = catchTopY(), reach = catchReach();
+  for (const it of g.items) {
+    it.y += it.vy * dt;
+    if (it.done) continue;
+    const bottom = it.y + half;
+    if (bottom < top) continue;
+    if (bottom <= top + 20 && Math.abs(it.x - g.bx) <= reach) {
+      it.done = true;
+      it.caught = true;
+      if (it.type === 'bomb') {
+        g.lives--;
+        g.bombsHit++;
+        g.streak = 0;
+        g.mult = 1;
+        g.hurtT = 0.5;
+        g.events.push({ kind: 'bomb', it });
+        if (g.lives <= 0) g.over = true;
+      } else {
+        g.streak++;
+        g.caught++;
+        g.maxStreak = Math.max(g.maxStreak, g.streak);
+        const m = Math.min(CONFIG.comboMax, 1 + Math.floor(g.streak / CONFIG.comboStep));
+        if (m > g.mult) g.events.push({ kind: 'multUp', mult: m });
+        g.mult = m;
+        const pts = CONFIG.points[it.type] * g.mult;
+        g.score += pts;
+        g.events.push({ kind: 'catch', it, pts });
+      }
+    } else if (bottom > top + 20) {
+      it.done = true;   // 놓침 (감점 없음, streak 유지)
+      if (it.type !== 'bomb') g.missed++;
+    }
+  }
+  g.items = g.items.filter((it) => !it.caught && it.y - 20 < H);
+
+  if (g.t >= CONFIG.duration) g.over = true;
+}
+
+function starsFor(score) {
+  return 1 + CONFIG.starGrades.filter((s) => score >= s).length;
+}
+
+// ============================================================
+// 그리기
+// ============================================================
+function drawSky(t) {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#74c0fc');
+  g.addColorStop(1, '#e7f5ff');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+  // 구름
+  for (let i = 0; i < 4; i++) {
+    const x = ((i * 290 + t * 12) % (W + 200)) - 100;
+    const y = 110 + (i % 2) * 70;
+    circle(x, y, 26, 'rgba(255,255,255,0.8)');
+    circle(x + 28, y - 10, 30, 'rgba(255,255,255,0.8)');
+    circle(x + 58, y, 24, 'rgba(255,255,255,0.8)');
+  }
+  rect(0, 510, W, 30, '#69db7c');
+  rect(0, 510, W, 4, '#40c057');
+}
+
+function drawApple(x, y) {
+  circle(x, y + 1, 20, '#fa5252');
+  ctx.strokeStyle = '#7f5539'; ctx.lineWidth = 3; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(x, y - 17); ctx.lineTo(x + 2, y - 26); ctx.stroke();
+  ctx.lineCap = 'butt';
+  ctx.fillStyle = '#40c057';
+  ctx.beginPath(); ctx.ellipse(x + 9, y - 22, 8, 4, -0.5, 0, Math.PI * 2); ctx.fill();
+  circle(x - 7, y - 6, 4, 'rgba(255,255,255,0.85)');
+}
+
+function drawBanana(x, y) {
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = '#e8b500'; ctx.lineWidth = 14;
+  ctx.beginPath(); ctx.arc(x, y - 14, 24, Math.PI * 0.18, Math.PI * 0.82); ctx.stroke();
+  ctx.strokeStyle = '#ffe066'; ctx.lineWidth = 9;
+  ctx.beginPath(); ctx.arc(x, y - 14, 24, Math.PI * 0.2, Math.PI * 0.8); ctx.stroke();
+  ctx.lineCap = 'butt';
+  const a1 = Math.PI * 0.18, a2 = Math.PI * 0.82;
+  circle(x + Math.cos(a1) * 24, y - 14 + Math.sin(a1) * 24, 4, '#7f5539');
+  circle(x + Math.cos(a2) * 24, y - 14 + Math.sin(a2) * 24, 4, '#7f5539');
+}
+
+function starPath(cx, cy, R, r, rot) {
+  ctx.beginPath();
+  for (let i = 0; i < 10; i++) {
+    const a = rot - Math.PI / 2 + (i * Math.PI) / 5;
+    const rr = i % 2 ? r : R;
+    ctx.lineTo(cx + Math.cos(a) * rr, cy + Math.sin(a) * rr);
+  }
+  ctx.closePath();
+}
+
+function drawStar(x, y, t) {
+  starPath(x, y, 21, 9, t * 1.5);
+  ctx.fillStyle = '#ffd43b'; ctx.fill();
+  ctx.strokeStyle = '#f76707'; ctx.lineWidth = 3; ctx.stroke();
+  const tw = (Math.sin(t * 8) + 1) / 2;
+  circle(x - 5, y - 6, 2 + tw * 2, '#fff');
+}
+
+function drawBomb(x, y, t) {
+  ctx.strokeStyle = '#495057'; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.moveTo(x + 6, y - 17); ctx.quadraticCurveTo(x + 14, y - 28, x + 8, y - 30); ctx.stroke();
+  circle(x, y + 2, 19, '#212529');
+  circle(x - 7, y - 5, 5, '#868e96');
+  const f = Math.floor(t * 12) % 2;
+  circle(x + 8, y - 31, f ? 7 : 5, '#ff922b');
+  circle(x + 8, y - 31, f ? 3 : 2, '#ffe066');
+}
+
+function drawItem(it, t) {
+  if (it.type === 'apple') drawApple(it.x, it.y);
+  else if (it.type === 'banana') drawBanana(it.x, it.y);
+  else if (it.type === 'star') drawStar(it.x, it.y, t + it.spin);
+  else drawBomb(it.x, it.y, t + it.spin);
+}
+
+function drawBasket(cx, hurt) {
+  const y = CONFIG.basketY, top = CONFIG.basketW / 2, bot = 48;
+  const red = hurt > 0 && Math.floor(hurt * 10) % 2 === 0;
+  ctx.fillStyle = red ? '#fa5252' : '#a0522d';
+  ctx.beginPath();
+  ctx.moveTo(cx - top, y); ctx.lineTo(cx + top, y);
+  ctx.lineTo(cx + bot, y + CONFIG.basketH); ctx.lineTo(cx - bot, y + CONFIG.basketH);
+  ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = red ? '#c92a2a' : '#6b3410'; ctx.lineWidth = 3;
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(cx - top + 5, y + 10); ctx.lineTo(cx + top - 5, y + 10);
+  ctx.moveTo(cx - top + 10, y + 20); ctx.lineTo(cx + top - 10, y + 20);
+  ctx.stroke();
+  rect(cx - top - 4, y - 4, CONFIG.basketW + 8, 6, red ? '#c92a2a' : '#7f3f1d');
+}
+
+function drawHeart(x, y, s, color) {
+  ctx.beginPath();
+  ctx.moveTo(x, y + s * 0.3);
+  ctx.bezierCurveTo(x, y, x - s / 2, y, x - s / 2, y + s * 0.3);
+  ctx.bezierCurveTo(x - s / 2, y + s * 0.6, x, y + s * 0.8, x, y + s);
+  ctx.bezierCurveTo(x, y + s * 0.8, x + s / 2, y + s * 0.6, x + s / 2, y + s * 0.3);
+  ctx.bezierCurveTo(x + s / 2, y, x, y, x, y + s * 0.3);
+  ctx.fillStyle = color;
+  ctx.fill();
+}
+
+// ============================================================
+// 장면
+// ============================================================
+const TitleScene = {
+  name: 'TITLE',
+  idle: true,
+  update() {
+    if (anyPressed()) { sfx.select(); setScene(CountdownScene(PlayScene)); return; }
+    if (performance.now() - lastInput > CONFIG.attractAfter * 1000) {
+      setScene(RankScene(RANK_KEY, -1, RANK_TITLE));
+    }
+  },
+  draw() {
+    const t = sceneTime;
+    drawSky(t);
+    text('과일 받기', W / 2, 78, 76, '#fff');
+
+    // 받기 / 피하기 설명
+    roundRect(150, 140, 400, 150, 18, 'rgba(255,255,255,0.85)');
+    drawApple(215, 205, t); drawBanana(305, 210); drawStar(395, 205, t);
+    ctx.strokeStyle = '#2f9e44'; ctx.lineWidth = 6;
+    ctx.beginPath(); ctx.arc(490, 205, 22, 0, Math.PI * 2); ctx.stroke();
+    textPlain('받아요!', 350, 265, 24, '#2b8a3e');
+
+    roundRect(590, 140, 220, 150, 18, 'rgba(255,255,255,0.85)');
+    drawBomb(655, 210, t);
+    ctx.strokeStyle = '#e03131'; ctx.lineWidth = 7; ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(725, 185); ctx.lineTo(765, 225); ctx.moveTo(765, 185); ctx.lineTo(725, 225);
+    ctx.stroke(); ctx.lineCap = 'butt';
+    textPlain('피해요!', 700, 265, 24, '#c92a2a');
+
+    // 조작 키
+    keyCap(395, 310, 70, 56, '←', keys.ArrowLeft || keys.KeyA);
+    keyCap(495, 310, 70, 56, '→', keys.ArrowRight || keys.KeyD);
+    text('A · D 키도 돼요', W / 2, 392, 22, '#fff');
+
+    // 바구니 시범
+    drawBasket(W / 2 + Math.sin(t * 1.6) * 260, 0);
+
+    if (Math.floor(t * 2) % 2 === 0) text('아무 키나 눌러서 시작!', W / 2, 440, 34, '#ffe066');
+  },
+};
+
+let game = null;
+let fx = [];          // 떠오르는 글자, 폭발 등 효과
+let multPop = 0;
+let lastTick = -1;
+
+const PlayScene = {
+  name: 'PLAY',
+  idle: false,
+  enter() {
+    game = newGame();
+    fx = [];
+    multPop = 0;
+    lastTick = -1;
+  },
+  update(dt) {
+    const left = keys.ArrowLeft || keys.KeyA, right = keys.ArrowRight || keys.KeyD;
+    const dir = (right ? 1 : 0) - (left ? 1 : 0);
+    stepGame(game, dt, dir);
+
+    for (const e of game.events) {
+      if (e.kind === 'catch') {
+        if (e.it.type === 'star') {
+          sfx.bonus();
+          for (let i = 0; i < 8; i++) fx.push({ kind: 'spark', x: e.it.x, y: CONFIG.basketY, vx: rand(-160, 160), vy: rand(-260, -80), t: 0.6 });
+        } else {
+          sfx.pick(1 + 0.1 * (game.mult - 1));
+        }
+        fx.push({ kind: 'pts', x: e.it.x, y: CONFIG.basketY - 20, str: '+' + e.pts, t: 0.8, color: e.it.type === 'star' ? '#ffd43b' : '#fff' });
+      } else if (e.kind === 'bomb') {
+        sfx.hit();
+        shake(8, 0.25);
+        fx.push({ kind: 'boom', x: e.it.x, y: CONFIG.basketY, t: 0.4 });
+      } else if (e.kind === 'multUp') {
+        sfx.up();
+        multPop = 0.4;
+      }
+    }
+
+    const remain = CONFIG.duration - game.t;
+    if (remain <= 10 && remain > 0) {
+      const s = Math.ceil(remain);
+      if (s !== lastTick) { lastTick = s; sfx.tick(); }
+    }
+
+    for (const f of fx) {
+      f.t -= dt;
+      if (f.kind === 'pts') f.y -= 50 * dt;
+      if (f.kind === 'spark') { f.x += f.vx * dt; f.y += f.vy * dt; f.vy += 600 * dt; }
+    }
+    fx = fx.filter((f) => f.t > 0);
+    if (multPop > 0) multPop -= dt;
+
+    if (game.over) {
+      sfx.over();
+      setScene(ResultScene(game));
+    }
+  },
+  draw() {
+    const g = game, t = g.t;
+    drawSky(t);
+    for (const it of g.items) drawItem(it, t);
+    drawBasket(g.bx, g.hurtT);
+
+    for (const f of fx) {
+      if (f.kind === 'pts') {
+        ctx.globalAlpha = Math.min(1, f.t / 0.4);
+        text(f.str, f.x, f.y, 28, f.color);
+        ctx.globalAlpha = 1;
+      } else if (f.kind === 'boom') {
+        const p = 1 - f.t / 0.4;
+        ctx.globalAlpha = 1 - p;
+        circle(f.x, f.y, 20 + p * 70, '#ff922b');
+        circle(f.x, f.y, 10 + p * 40, '#ffe066');
+        ctx.globalAlpha = 1;
+      } else if (f.kind === 'spark') {
+        starPath(f.x, f.y, 7, 3, f.t * 10);
+        ctx.fillStyle = '#ffd43b'; ctx.fill();
+      }
+    }
+
+    // HUD
+    rect(0, 0, W, 50, 'rgba(0,0,0,0.25)');
+    text('SCORE ' + String(g.score).padStart(4, '0'), 20, 26, 28, '#fff', 'left');
+    const remain = Math.max(0, CONFIG.duration - t);
+    const low = remain <= 10;
+    const blinkOff = low && Math.floor(t * 4) % 2 === 0;
+    roundRect(330, 16, 300, 20, 10, 'rgba(255,255,255,0.5)');
+    if (remain > 0) roundRect(330, 16, 300 * (remain / CONFIG.duration), 20, 10, low ? (blinkOff ? '#ff8787' : '#fa5252') : '#51cf66');
+    text(Math.ceil(remain) + 's', 650, 26, 24, low ? '#ff8787' : '#fff', 'left');
+    for (let i = 0; i < CONFIG.lives; i++) {
+      drawHeart(W - 170 + i * 40, 12, 26, i < g.lives ? '#fa5252' : 'rgba(0,0,0,0.3)');
+    }
+    if (g.mult > 1) {
+      const s = 1 + Math.max(0, multPop) * 1.2;
+      ctx.save();
+      ctx.translate(W / 2, 82);
+      ctx.scale(s, s);
+      text('×' + g.mult, 0, 0, 44, g.mult >= 3 ? '#ff922b' : '#ffe066');
+      ctx.restore();
+    }
+    if (g.t < 3) text('← → 로 바구니를 움직여요', W / 2, 140, 26, '#fff');
+  },
+};
+
+function ResultScene(g) {
+  const stars = starsFor(g.score);
+  let shownStars = 0;
+  return {
+    name: 'RESULT',
+    idle: true,
+    update() {
+      const n = Math.min(stars, Math.floor((sceneTime - 0.5) / 0.35) + 1);
+      if (n > shownStars) { shownStars = n; sfx.coin(); }
+      if (sceneTime > 2 && anyPressed()) {
+        if (qualifies(RANK_KEY, g.score)) {
+          setScene(InitialsScene(RANK_KEY, g.score, (idx) => RankScene(RANK_KEY, idx, RANK_TITLE)));
+        } else {
+          setScene(RankScene(RANK_KEY, -1, RANK_TITLE));
+        }
+      }
+    },
+    draw() {
+      drawSky(sceneTime);
+      rect(0, 0, W, H, 'rgba(0,0,0,0.25)');
+      text(g.lives <= 0 ? '폭탄을 너무 많이 받았어요!' : '시간 끝!', W / 2, 70, 40, '#fff');
+      text(String(g.score), W / 2, 160, 96, '#ffe066');
+      text('점', W / 2 + textWidth(String(g.score), 96) / 2 + 30, 175, 32, '#fff');
+      for (let i = 0; i < 4; i++) {
+        const x = W / 2 - 150 + i * 100, y = 270;
+        const on = i < shownStars;
+        const age = sceneTime - 0.5 - i * 0.35;
+        const s = on ? 1 + Math.max(0, 0.3 - age) * 2 : 1;
+        starPath(x, y, 38 * s, 16 * s, 0);
+        ctx.fillStyle = on ? '#ffd43b' : 'rgba(255,255,255,0.25)';
+        ctx.fill();
+        ctx.strokeStyle = on ? '#f76707' : 'rgba(0,0,0,0.2)'; ctx.lineWidth = 4; ctx.stroke();
+      }
+      text(`받은 과일 ${g.caught}개     최고 연속 ${g.maxStreak}번`, W / 2, 360, 30, '#fff');
+      if (qualifies(RANK_KEY, g.score)) text('순위에 들었어요!', W / 2, 410, 30, '#69db7c');
+      if (sceneTime > 2 && Math.floor(sceneTime * 2) % 2 === 0) {
+        text('아무 키나 눌러서 계속', W / 2, 480, 26, '#ffe066');
+      }
+    },
+  };
+}
+
+// ============================================================
+// 자동 검증 (콘솔에서 실행: testFairness(), testPerfectBot(), testRandomBot())
+// ============================================================
+
+// 화면 없이 생성만 반복해, 연속된 폭탄 아닌 물체 사이 거리가 바구니가 갈 수 있는 거리 이하인지 검사
+function testFairness(runs = 1000) {
+  let pairs = 0, violations = 0, orderFlips = 0, worst = 0;
+  for (let r = 0; r < runs; r++) {
+    const g = newGame();
+    const list = [];
+    for (g.t = 0; g.t < CONFIG.duration; g.t += 1 / 60) {
+      while (g.t >= g.spawnT) { const it = spawn(g); if (it.type !== 'bomb') list.push(it); g.spawnT += stageAt(g.t).interval; }
+    }
+    for (let i = 1; i < list.length; i++) {
+      const a = list[i - 1], b = list[i];
+      const dtA = b.arrive - a.arrive;
+      if (dtA < 0) orderFlips++;
+      const need = Math.abs(b.x - a.x), can = CONFIG.basketSpeed * Math.max(0, dtA);
+      pairs++;
+      if (need > can + 1e-6) { violations++; worst = Math.max(worst, need - can); }
+    }
+  }
+  return { runs, pairs, violations, orderFlips, worstExcessPx: Math.round(worst) };
+}
+
+function runBot(bot, runs) {
+  const DT = 1 / 60;
+  let scoreSum = 0, bombGames = 0, bombs = 0, caught = 0, fruits = 0, deaths = 0;
+  const scores = [];
+  for (let r = 0; r < runs; r++) {
+    const g = newGame();
+    const memo = {};
+    while (!g.over) stepGame(g, DT, bot(g, memo, DT));
+    scoreSum += g.score; scores.push(g.score);
+    bombs += g.bombsHit; if (g.bombsHit) bombGames++;
+    if (g.lives <= 0) deaths++;
+    caught += g.caught;
+    fruits += g.caught + g.missed;
+  }
+  scores.sort((a, b) => a - b);
+  return {
+    runs, avgScore: Math.round(scoreSum / runs),
+    p10: scores[Math.floor(runs * 0.1)], p90: scores[Math.floor(runs * 0.9)],
+    bombGamesPct: +(bombGames / runs * 100).toFixed(1), bombsPerGame: +(bombs / runs).toFixed(2),
+    deathsPct: +(deaths / runs * 100).toFixed(1),
+    catchPct: +(caught / Math.max(1, fruits) * 100).toFixed(1),
+  };
+}
+
+// 과일만 쫓고 폭탄을 피하는 봇
+function perfectBot(g) {
+  const half = CONFIG.itemHit / 2, top = catchTopY(), reach = catchReach(), hb = CONFIG.basketW / 2;
+  const live = g.items.filter((it) => !it.done);
+  const target = live.filter((it) => it.type !== 'bomb').sort((a, b) => a.arrive - b.arrive)[0];
+  let want = target ? target.x : g.bx;
+  for (const b of live) {
+    if (b.type !== 'bomb') continue;
+    const tta = (top - (b.y + half)) / b.vy;
+    if (tta < -0.1 || tta > 0.4) continue;
+    // 지금 위치에서 목표까지 가는 길에 곧 떨어질 폭탄이 있으면 옆으로 비킴
+    const lo = Math.min(g.bx, want) - reach - 12, hi = Math.max(g.bx, want) + reach + 12;
+    if (b.x < lo || b.x > hi) continue;
+    const l = b.x - reach - 16, r = b.x + reach + 16;
+    const canL = l >= hb, canR = r <= W - hb;
+    want = (!canR || (canL && Math.abs(l - g.bx) < Math.abs(r - g.bx))) ? l : r;
+  }
+  const d = want - g.bx;
+  return Math.abs(d) < 5 ? 0 : Math.sign(d);
+}
+
+function testPerfectBot(runs = 1000) { return runBot(perfectBot, runs); }
+
+// 아무렇게나 움직이는 봇 (0.3초마다 방향을 바꿈)
+function testRandomBot(runs = 1000) {
+  return runBot((g, m, dt) => {
+    m.t = (m.t || 0) - dt;
+    if (m.t <= 0) { m.t = 0.3; m.dir = randInt(-1, 1); }
+    return m.dir;
+  }, runs);
+}
+
+start(TitleScene);
+</script>
+</body>
+</html>

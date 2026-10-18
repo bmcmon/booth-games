@@ -1,0 +1,712 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<link rel="icon" href="data:,">
+<title>2인 대전</title>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="core.js"></script>
+<script>
+'use strict';
+// 게임 3 — 2인 대전 (03-versus-plan.md)
+
+// ============================================================
+// 조정값
+// ============================================================
+const CONFIG = {
+  fieldTop: 60, midX: 480, midGap: 4,
+  playerSize: 48, playerHit: 40, playerSpeed: 280,
+  ballR: 10, ballVX: 520, ballVY: 260,     // 기울기 0.5
+  cooldown: 0.6,
+  lives: 3, invuln: 0.8,
+  matchTime: 90, suddenTime: 15, suddenIntro: 1,
+  selfSafe: 0.15,                           // 던진 직후 본인과 충돌 안 함
+  ai: { think: 0.25, aimError: 80, speedRate: 0.7, fireYDiff: 50, fireChance: 0.5, randomFire: 0.10,
+        dodgeDist: 250, dodgeYDiff: 50, dodgeChance: 0.4 },   // 사람 흉내 봇이 약 79% 이기도록 맞춤
+  item: { enabled: true, every: 15, stay: 8, shield: 2.5, size: 34 },
+  resultIdle: 10,                           // 결과 화면에서 입력이 없으면 처음으로
+};
+
+const PS = CONFIG.playerSize, HIT_IN = (CONFIG.playerSize - CONFIG.playerHit) / 2;
+const FIELD_B = H;
+const ZONES = [
+  { x0: 0, x1: CONFIG.midX - CONFIG.midGap - PS },
+  { x0: CONFIG.midX + CONFIG.midGap, x1: W - PS },
+];
+const COLORS = [
+  { main: '#339af0', dark: '#1864ab', light: '#e7f5ff' },
+  { main: '#ff6b6b', dark: '#c92a2a', light: '#fff5f5' },
+];
+
+// ============================================================
+// 경기 상태 (화면과 분리)
+// ============================================================
+function startPos(id) {
+  const z = ZONES[id];
+  return { x: id === 0 ? z.x0 + 80 : z.x1 - 80, y: (CONFIG.fieldTop + FIELD_B) / 2 - PS / 2 };
+}
+
+function newPlayer(id) {
+  const s = startPos(id);
+  return { id, x: s.x, y: s.y, facing: id === 0 ? 1 : -1, lives: CONFIG.lives, cool: 0, inv: 0, shield: 0, flash: 0 };
+}
+
+function newMatch() {
+  return {
+    t: 0, phase: 'play',             // play | intro(서든데스 시작 1초) | sudden | over
+    timeLeft: CONFIG.matchTime, suddenLeft: 0, introT: 0, sudden: false,
+    p: [newPlayer(0), newPlayer(1)],
+    balls: [], items: [], itemT: CONFIG.item.every, itemSide: 0,
+    winner: null,                    // 0 | 1 | 'draw'
+    hits: 0, events: [],
+  };
+}
+
+function throwBall(m, p, inp) {
+  if (p.cool > 0) return;
+  const dy = (inp.down ? 1 : 0) - (inp.up ? 1 : 0);
+  m.balls.push({
+    x: p.x + PS / 2 + p.facing * 30, y: p.y + PS / 2,
+    vx: p.facing * CONFIG.ballVX, vy: dy * CONFIG.ballVY,
+    owner: p.id, age: 0, trail: [],
+  });
+  p.cool = CONFIG.cooldown;
+  m.events.push({ kind: 'throw', id: p.id });
+}
+
+function playerRect(p) {
+  return { l: p.x + HIT_IN, r: p.x + PS - HIT_IN, t: p.y + HIT_IN, b: p.y + PS - HIT_IN };
+}
+
+function circleHitsRect(cx, cy, r, b) {
+  const nx = clamp(cx, b.l, b.r), ny = clamp(cy, b.t, b.b);
+  return (nx - cx) ** 2 + (ny - cy) ** 2 < r * r;
+}
+
+// 두 공이 이번 프레임 동안 가장 가까웠던 거리 (빠른 공이 서로 뚫고 지나가지 않게)
+function closestDist(a, b) {
+  const rx0 = a.px - b.px, ry0 = a.py - b.py;
+  const rx1 = a.x - b.x, ry1 = a.y - b.y;
+  const dx = rx1 - rx0, dy = ry1 - ry0;
+  const len = dx * dx + dy * dy;
+  const s = len > 0 ? clamp(-(rx0 * dx + ry0 * dy) / len, 0, 1) : 1;
+  return Math.hypot(rx0 + dx * s, ry0 + dy * s);
+}
+
+function enterSudden(m) {
+  m.sudden = true;
+  m.phase = 'intro';
+  m.introT = CONFIG.suddenIntro;
+  m.suddenLeft = CONFIG.suddenTime;
+  m.balls = [];
+  m.items = [];
+  for (const p of m.p) {
+    const s = startPos(p.id);
+    Object.assign(p, { x: s.x, y: s.y, lives: 1, cool: 0, inv: 0, shield: 0 });
+  }
+  m.events.push({ kind: 'sudden' });
+}
+
+function finish(m, winner) {
+  m.phase = 'over';
+  m.winner = winner;
+  m.events.push({ kind: 'over', winner });
+}
+
+// inputs[i]: { up, down, left, right, fire, speed? }
+function stepMatch(m, dt, inputs) {
+  m.events.length = 0;
+  if (m.phase === 'over') return;
+  m.t += dt;
+  for (const p of m.p) { p.flash = Math.max(0, p.flash - dt); }
+  if (m.phase === 'intro') {
+    m.introT -= dt;
+    if (m.introT <= 0) m.phase = 'sudden';
+    return;
+  }
+  if (m.phase === 'play') m.timeLeft -= dt; else m.suddenLeft -= dt;
+
+  // 이동·던지기
+  for (const p of m.p) {
+    const inp = inputs[p.id];
+    let dx = (inp.right ? 1 : 0) - (inp.left ? 1 : 0);
+    let dy = (inp.down ? 1 : 0) - (inp.up ? 1 : 0);
+    if (dx && dy) { dx *= Math.SQRT1_2; dy *= Math.SQRT1_2; }   // 대각선이 더 빠르지 않게
+    const sp = CONFIG.playerSpeed * (inp.speed || 1);
+    const z = ZONES[p.id];
+    p.x = clamp(p.x + dx * sp * dt, z.x0, z.x1);
+    p.y = clamp(p.y + dy * sp * dt, CONFIG.fieldTop, FIELD_B - PS);
+    p.cool -= dt; p.inv -= dt; p.shield -= dt;
+    if (inp.fire) throwBall(m, p, inp);
+  }
+
+  // 공: 1 이동 → 2 위아래 벽 반사
+  const r = CONFIG.ballR;
+  for (const b of m.balls) {
+    b.px = b.x; b.py = b.y;
+    b.trail.unshift({ x: b.x, y: b.y });
+    if (b.trail.length > 3) b.trail.pop();
+    b.x += b.vx * dt; b.y += b.vy * dt; b.age += dt;
+    if (b.y - r < CONFIG.fieldTop) { b.y = 2 * (CONFIG.fieldTop + r) - b.y; b.vy = Math.abs(b.vy); m.events.push({ kind: 'wall' }); }
+    if (b.y + r > FIELD_B) { b.y = 2 * (FIELD_B - r) - b.y; b.vy = -Math.abs(b.vy); m.events.push({ kind: 'wall' }); }
+  }
+  // 3 공끼리 충돌 → 둘 다 소멸
+  for (let i = 0; i < m.balls.length; i++) {
+    for (let j = i + 1; j < m.balls.length; j++) {
+      const a = m.balls[i], b = m.balls[j];
+      if (a.dead || b.dead || a.owner === b.owner) continue;
+      if (closestDist(a, b) < r * 2) {
+        a.dead = b.dead = true;
+        m.events.push({ kind: 'clash', x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+      }
+    }
+  }
+  // 4 플레이어 충돌
+  const hitNow = [false, false];
+  for (const b of m.balls) {
+    if (b.dead) continue;
+    for (const p of m.p) {
+      if (p.id === b.owner && b.age < CONFIG.selfSafe) continue;
+      if (!circleHitsRect(b.x, b.y, r, playerRect(p))) continue;
+      if (p.shield > 0) { b.dead = true; m.events.push({ kind: 'block', x: b.x, y: b.y }); break; }
+      if (p.inv > 0) continue;   // 무적 중이면 공은 그대로 통과
+      b.dead = true;
+      p.lives--; p.inv = CONFIG.invuln; p.flash = 0.1;
+      hitNow[p.id] = true;
+      m.hits++;
+      m.events.push({ kind: 'hit', id: p.id, x: b.x, y: b.y });
+      break;
+    }
+  }
+  // 5 좌우 화면 밖 → 소멸
+  m.balls = m.balls.filter((b) => !b.dead && b.x > -r && b.x < W + r);
+
+  // 방패 아이템
+  if (CONFIG.item.enabled && m.phase === 'play') {
+    m.itemT -= dt;
+    if (m.itemT <= 0) {
+      m.itemT = CONFIG.item.every;
+      const z = ZONES[m.itemSide], s = CONFIG.item.size;
+      m.items.push({ side: m.itemSide, x: rand(z.x0 + 20, z.x1 + PS - s - 20), y: rand(CONFIG.fieldTop + 30, FIELD_B - s - 30), life: CONFIG.item.stay });
+      m.itemSide = 1 - m.itemSide;
+    }
+  }
+  for (const it of m.items) {
+    it.life -= dt;
+    const p = m.p[it.side], s = CONFIG.item.size;
+    const pr = playerRect(p);
+    if (pr.l < it.x + s && pr.r > it.x && pr.t < it.y + s && pr.b > it.y) {
+      it.life = 0;
+      p.shield = CONFIG.item.shield;
+      m.events.push({ kind: 'shield', id: p.id });
+    }
+  }
+  m.items = m.items.filter((it) => it.life > 0);
+
+  // 승패
+  const [a, b] = m.p;
+  if (a.lives <= 0 && b.lives <= 0) {
+    if (m.sudden) finish(m, 'draw'); else enterSudden(m);
+  } else if (a.lives <= 0) finish(m, 1);
+  else if (b.lives <= 0) finish(m, 0);
+  else if (m.phase === 'play' && m.timeLeft <= 0) {
+    m.timeLeft = 0;
+    if (a.lives !== b.lives) finish(m, a.lives > b.lives ? 0 : 1);
+    else enterSudden(m);
+  } else if (m.phase === 'sudden' && m.suddenLeft <= 0) {
+    m.suddenLeft = 0;
+    finish(m, 'draw');
+  }
+}
+
+// ============================================================
+// 컴퓨터 상대 (이기기 쉬운 상대)
+// ============================================================
+function aiInput(m, id, mem, dt) {
+  const A = CONFIG.ai, me = m.p[id], opp = m.p[1 - id];
+  const out = { up: false, down: false, left: false, right: false, fire: false, speed: A.speedRate };
+  mem.think = (mem.think || 0) - dt;
+  mem.dodgeT = (mem.dodgeT || 0) - dt;
+  if (mem.think <= 0) {
+    mem.think = A.think;
+    mem.targetY = opp.y + rand(-A.aimError, A.aimError);
+    const z = ZONES[id];
+    mem.targetX = rand(lerp(z.x0, z.x1, 0.35), lerp(z.x0, z.x1, 0.9));
+    if (id === 0) mem.targetX = rand(lerp(z.x0, z.x1, 0.1), lerp(z.x0, z.x1, 0.65));
+    mem.fire = (Math.abs(opp.y - me.y) < A.fireYDiff && me.cool <= 0 && Math.random() < A.fireChance) || Math.random() < A.randomFire;
+    // 피하기: 자기 쪽으로 오는 가까운 공
+    const cy = me.y + PS / 2, cx = me.x + PS / 2;
+    for (const b of m.balls) {
+      if (b.owner === id || Math.sign(cx - b.x) !== Math.sign(b.vx)) continue;
+      const dist = Math.abs(cx - b.x);
+      if (dist > A.dodgeDist) continue;
+      const py = b.y + b.vy * (dist / Math.abs(b.vx));
+      if (Math.abs(py - cy) < A.dodgeYDiff && Math.random() < A.dodgeChance) {
+        mem.dodgeT = 0.3;
+        mem.dodgeDir = py > cy ? -1 : 1;
+        if (me.y < CONFIG.fieldTop + 40) mem.dodgeDir = 1;
+        if (me.y > FIELD_B - PS - 40) mem.dodgeDir = -1;
+        break;
+      }
+    }
+  }
+  if (mem.dodgeT > 0) {
+    out.up = mem.dodgeDir < 0; out.down = mem.dodgeDir > 0;
+    out.speed = 1;
+  } else {
+    const dy = mem.targetY - me.y;
+    if (Math.abs(dy) > 8) { out.up = dy < 0; out.down = dy > 0; }
+  }
+  const dx = mem.targetX - me.x;
+  if (Math.abs(dx) > 10) { out.left = dx < 0; out.right = dx > 0; }
+  if (mem.fire) {
+    out.fire = true; out.up = false; out.down = false;   // 직선으로만 던짐
+    mem.fire = false;
+  }
+  return out;
+}
+
+// 사람 흉내 봇 (균형 시뮬레이션용): 반응 지연 0.2~0.35초, 조준 오차, 가끔 비스듬히 던짐
+function humanBot(m, id, mem, dt) {
+  const me = m.p[id], opp = m.p[1 - id];
+  const out = { up: false, down: false, left: false, right: false, fire: false };
+  mem.think = (mem.think || 0) - dt;
+  if (mem.think <= 0) {
+    mem.think = rand(0.2, 0.35);
+    mem.targetY = opp.y + (Math.random() + Math.random() - 1) * 70;
+    const z = ZONES[id];
+    mem.targetX = rand(lerp(z.x0, z.x1, id === 0 ? 0.2 : 0.3), lerp(z.x0, z.x1, id === 0 ? 0.7 : 0.8));
+    mem.fire = Math.abs(opp.y - me.y) < 50 ? Math.random() < 0.8 : Math.random() < 0.15;
+    mem.diag = Math.random() < 0.2 ? (opp.y + PS / 2 < (CONFIG.fieldTop + FIELD_B) / 2 ? -1 : 1) : 0;
+    mem.dodge = 0;
+    const cy = me.y + PS / 2, cx = me.x + PS / 2;
+    for (const b of m.balls) {
+      if (b.owner === id || Math.sign(cx - b.x) !== Math.sign(b.vx)) continue;
+      const dist = Math.abs(cx - b.x);
+      if (dist > 320) continue;
+      const py = b.y + b.vy * (dist / Math.abs(b.vx));
+      if (Math.abs(py - cy) < 40 && Math.random() < 0.75) {
+        mem.dodge = py > cy ? -1 : 1;
+        if (me.y < CONFIG.fieldTop + 40) mem.dodge = 1;
+        if (me.y > FIELD_B - PS - 40) mem.dodge = -1;
+        break;
+      }
+    }
+  }
+  if (mem.dodge) { out.up = mem.dodge < 0; out.down = mem.dodge > 0; }
+  else {
+    const dy = mem.targetY - me.y;
+    if (Math.abs(dy) > 8) { out.up = dy < 0; out.down = dy > 0; }
+  }
+  const dx = mem.targetX - me.x;
+  if (Math.abs(dx) > 10) { out.left = dx < 0; out.right = dx > 0; }
+  if (mem.fire && me.cool <= 0) {
+    out.fire = true;
+    out.up = mem.diag < 0; out.down = mem.diag > 0;
+    mem.fire = false;
+  }
+  return out;
+}
+
+// ============================================================
+// 입력 (키맵 프리셋)
+// ============================================================
+let keymapName = 'A';
+try { const s = localStorage.getItem(VERSUS_KEYMAP_KEY); if (KEY_PRESETS[s]) keymapName = s; } catch (e) { /* 무시 */ }
+let vsCPU = false;
+
+function readKeys(km) {
+  return {
+    up: !!keys[km.up], down: !!keys[km.down], left: !!keys[km.left], right: !!keys[km.right],
+    fire: km.fire.some((c) => keys[c]),
+  };
+}
+
+function keyHint(km) {
+  const n = (c) => keyName(c);
+  return `${n(km.up)} ${n(km.left)} ${n(km.down)} ${n(km.right)} + ${n(km.fire[0])}`;
+}
+
+// ============================================================
+// 그리기
+// ============================================================
+function drawField(sudden, t) {
+  rect(0, 0, W, H, '#212529');
+  rect(0, CONFIG.fieldTop, CONFIG.midX, H - CONFIG.fieldTop, COLORS[0].light);
+  rect(CONFIG.midX, CONFIG.fieldTop, W - CONFIG.midX, H - CONFIG.fieldTop, COLORS[1].light);
+  ctx.setLineDash([10, 10]);
+  ctx.strokeStyle = '#adb5bd'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(CONFIG.midX, CONFIG.fieldTop); ctx.lineTo(CONFIG.midX, H); ctx.stroke();
+  ctx.setLineDash([]);
+  if (sudden && Math.floor(t * 4) % 2 === 0) {
+    ctx.strokeStyle = '#fa5252'; ctx.lineWidth = 8;
+    ctx.strokeRect(4, CONFIG.fieldTop + 4, W - 8, H - CONFIG.fieldTop - 8);
+  }
+}
+
+function drawPlayer(p, label, t, cool) {
+  if (p.inv > 0 && Math.floor(p.inv * 12) % 2 === 0) return;   // 무적 깜빡임
+  const c = COLORS[p.id];
+  roundRect(p.x, p.y, PS, PS, 12, p.flash > 0 ? '#fff' : c.main, c.dark, 3);
+  const ex = p.facing > 0 ? 28 : 12;
+  circle(p.x + ex - 5, p.y + 17, 6, '#fff');
+  circle(p.x + ex + 7, p.y + 17, 6, '#fff');
+  circle(p.x + ex - 5 + p.facing * 2, p.y + 17, 3, '#212529');
+  circle(p.x + ex + 7 + p.facing * 2, p.y + 17, 3, '#212529');
+  textPlain(label, p.x + PS / 2, p.y + 36, 13, '#fff');
+  if (p.shield > 0) {
+    ctx.globalAlpha = 0.35 + 0.25 * Math.sin(t * 20);
+    ctx.strokeStyle = '#4dabf7'; ctx.lineWidth = 5;
+    ctx.beginPath(); ctx.arc(p.x + PS / 2, p.y + PS / 2, 38, 0, Math.PI * 2); ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+  if (cool) {
+    const ready = p.cool <= 0;
+    rect(p.x, p.y + PS + 6, PS, 5, 'rgba(0,0,0,0.2)');
+    rect(p.x, p.y + PS + 6, PS * (ready ? 1 : 1 - p.cool / CONFIG.cooldown), 5, ready ? '#40c057' : '#868e96');
+  }
+}
+
+function drawBall(b) {
+  const c = COLORS[b.owner];
+  b.trail.forEach((tp, i) => {
+    ctx.globalAlpha = 0.3 - i * 0.08;
+    circle(tp.x, tp.y, CONFIG.ballR * (0.9 - i * 0.15), c.main);
+  });
+  ctx.globalAlpha = 1;
+  circle(b.x, b.y, CONFIG.ballR, c.main);
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.arc(b.x, b.y, CONFIG.ballR, 0, Math.PI * 2); ctx.stroke();
+}
+
+function hexPath(cx, cy, r) {
+  ctx.beginPath();
+  for (let i = 0; i < 6; i++) {
+    const a = Math.PI / 6 + (i * Math.PI) / 3;
+    ctx.lineTo(cx + Math.cos(a) * r, cy + Math.sin(a) * r);
+  }
+  ctx.closePath();
+}
+
+function drawItem(it, t) {
+  if (it.life < 2 && Math.floor(t * 8) % 2 === 0) return;   // 사라지기 전 깜빡임
+  const s = CONFIG.item.size, cx = it.x + s / 2, cy = it.y + s / 2 + Math.sin(t * 4) * 3;
+  hexPath(cx, cy, s / 2);
+  ctx.fillStyle = 'rgba(165,216,255,0.8)'; ctx.fill();
+  ctx.strokeStyle = '#1c7ed6'; ctx.lineWidth = 4; ctx.stroke();
+  hexPath(cx, cy, s / 4);
+  ctx.fillStyle = '#fff'; ctx.fill();
+}
+
+function drawHeartShape(x, y, s, color) {
+  ctx.beginPath();
+  ctx.moveTo(x, y + s * 0.3);
+  ctx.bezierCurveTo(x, y, x - s / 2, y, x - s / 2, y + s * 0.3);
+  ctx.bezierCurveTo(x - s / 2, y + s * 0.6, x, y + s * 0.8, x, y + s);
+  ctx.bezierCurveTo(x, y + s * 0.8, x + s / 2, y + s * 0.6, x + s / 2, y + s * 0.3);
+  ctx.bezierCurveTo(x + s / 2, y, x, y, x, y + s * 0.3);
+  ctx.fillStyle = color;
+  ctx.fill();
+}
+
+function heartPos(id, i) {
+  return id === 0 ? { x: 92 + i * 36, y: 17 } : { x: W - 92 - i * 36, y: 17 };
+}
+
+function drawHud(m, t) {
+  rect(0, 0, W, CONFIG.fieldTop, '#212529');
+  text('1P', 36, 30, 28, COLORS[0].main);
+  text(vsCPU ? 'CPU' : '2P', W - 40, 30, 26, COLORS[1].main);
+  const max = m.sudden ? 1 : CONFIG.lives;
+  for (const p of m.p) {
+    for (let i = 0; i < max; i++) {
+      const h = heartPos(p.id, i);
+      drawHeartShape(h.x, h.y, 26, i < p.lives ? '#fa5252' : '#495057');
+    }
+  }
+  if (m.sudden) {
+    text(m.phase === 'intro' ? '서든데스!' : Math.ceil(m.suddenLeft) + '', W / 2, 30, 34, '#ff6b6b');
+  } else {
+    const s = Math.ceil(m.timeLeft);
+    text(String(s), W / 2, 30, 36, s <= 10 ? '#ff6b6b' : '#fff');
+  }
+}
+
+// ============================================================
+// 장면
+// ============================================================
+const TitleScene = {
+  name: 'TITLE',
+  idle: true,
+  update() {
+    if (pressed.Digit1 || pressed.Numpad1) setKeymap('A');
+    if (pressed.Digit2 || pressed.Numpad2) setKeymap('B');
+    if (pressed.Digit3 || pressed.Numpad3) setKeymap('C');
+    if (pressed.Space || pressed.Enter || pressed.NumpadEnter) startMatch(false);
+    else if (pressed.Digit0 || pressed.Numpad0) startMatch(true);
+  },
+  draw() {
+    const t = sceneTime;
+    drawField(false, t);
+    rect(0, 0, W, CONFIG.fieldTop, '#212529');
+    text('2인 대전', W / 2, 32, 34, '#fff');
+    textPlain('공을 던져서 상대를 3번 먼저 맞히면 이겨요!', W / 2, 100, 26, '#212529');
+
+    const km = KEY_PRESETS[keymapName];
+    drawKeyGuide(60, 150, '1P', 0, km.p1, keys);
+    drawKeyGuide(W / 2 + 40, 150, '2P', 1, km.p2, keys);
+
+    const bob = Math.sin(t * 3) * 6;
+    drawPlayer({ id: 0, x: 190, y: 380 + bob, facing: 1, inv: 0, shield: 0, flash: 0, cool: 0 }, '1P', t, false);
+    drawPlayer({ id: 1, x: W - 238, y: 380 - bob, facing: -1, inv: 0, shield: 0, flash: 0, cool: 0 }, '2P', t, false);
+    const p = (t * 0.7) % 1;
+    drawBall({ owner: Math.floor(t * 0.7) % 2, x: Math.floor(t * 0.7) % 2 ? lerp(W - 260, 260, p) : lerp(260, W - 260, p), y: 404, trail: [] });
+
+    if (Math.floor(t * 2) % 2 === 0) text('둘이 같이 Space 또는 Enter!', W / 2, 360, 34, '#f76707');
+    textPlain('키맵', W / 2 - 230, 505, 18, '#495057');
+    ['A', 'B', 'C'].forEach((k, i) => {
+      const x = W / 2 - 190 + i * 90, sel = k === keymapName;
+      roundRect(x, 488, 80, 34, 8, sel ? '#339af0' : '#dee2e6', sel ? '#1864ab' : '#adb5bd', 2);
+      textPlain(`${i + 1} ${k}`, x + 40, 505, 18, sel ? '#fff' : '#495057');
+    });
+    roundRect(W / 2 + 90, 488, 170, 34, 8, '#fff3bf', '#f59f00', 2);
+    textPlain('0  컴퓨터와 하기', W / 2 + 175, 505, 17, '#e67700');
+  },
+};
+
+function drawKeyGuide(x, y, who, id, km, held) {
+  const c = COLORS[id];
+  roundRect(x, y, 380, 160, 16, 'rgba(255,255,255,0.75)', c.main, 3);
+  text(who, x + 40, y + 34, 30, c.main);
+  textPlain('이동', x + 140, y + 34, 18, '#495057');
+  const s = 46, bx = x + 110, by = y + 50;
+  keyCap(bx + s, by, s - 4, s - 4, keyName(km.up), held[km.up], 18);
+  keyCap(bx, by + s, s - 4, s - 4, keyName(km.left), held[km.left], 18);
+  keyCap(bx + s, by + s, s - 4, s - 4, keyName(km.down), held[km.down], 18);
+  keyCap(bx + s * 2, by + s, s - 4, s - 4, keyName(km.right), held[km.right], 18);
+  textPlain('던지기', x + 310, y + 34, 18, '#495057');
+  const f = keyName(km.fire[0]);
+  keyCap(x + 260, by + 20, 100, 60, f, km.fire.some((k) => held[k]), f.length > 5 ? 15 : 22);
+}
+
+function setKeymap(k) {
+  keymapName = k;
+  sfx.select();
+  try { localStorage.setItem(VERSUS_KEYMAP_KEY, k); } catch (e) { /* 무시 */ }
+}
+
+let streak = { who: null, n: 0 };   // 연승 기록
+function startMatch(cpu) {
+  vsCPU = cpu;
+  streak = { who: null, n: 0 };
+  sfx.select();
+  setScene(CountdownScene(PlayScene));
+}
+
+let match = null;
+let fx = [];
+let aiMem = {};
+let introShown = false;
+
+const PlayScene = {
+  name: 'PLAY',
+  idle: false,
+  enter() { match = newMatch(); fx = []; aiMem = {}; },
+  update(dt) {
+    const km = KEY_PRESETS[keymapName];
+    const in1 = readKeys(km.p1);
+    const in2 = vsCPU ? aiInput(match, 1, aiMem, dt) : readKeys(km.p2);
+    stepMatch(match, dt, [in1, in2]);
+
+    for (const e of match.events) {
+      if (e.kind === 'throw') sfx.throw();
+      else if (e.kind === 'wall') sfx.tick();
+      else if (e.kind === 'clash') {
+        beep(1200, 0.05, 'triangle', 0.08);
+        for (let i = 0; i < 8; i++) fx.push({ kind: 'shard', x: e.x, y: e.y, vx: rand(-200, 200), vy: rand(-200, 200), t: 0.4 });
+      } else if (e.kind === 'block') {
+        beep(900, 0.06, 'triangle', 0.08);
+        fx.push({ kind: 'ring', x: e.x, y: e.y, t: 0.3 });
+      } else if (e.kind === 'hit') {
+        sfx.hit();
+        shake(6, 0.15);
+        const p = match.p[e.id];
+        const h = heartPos(e.id, p.lives);
+        fx.push({ kind: 'heart', x: h.x, y: h.y, t: 0.6 });
+        fx.push({ kind: 'ring', x: e.x, y: e.y, t: 0.3 });
+      } else if (e.kind === 'shield') sfx.bonus();
+      else if (e.kind === 'sudden') sfx.count();
+      else if (e.kind === 'over') {
+        if (e.winner === 'draw') sfx.over(); else sfx.win();
+        setScene(ResultScene(match));
+        return;
+      }
+    }
+    if (match.phase === 'sudden' && match.events.length === 0 && !introShown) { introShown = true; sfx.go(); }
+    if (match.phase !== 'sudden') introShown = false;
+
+    for (const f of fx) {
+      f.t -= dt;
+      if (f.kind === 'shard') { f.x += f.vx * dt; f.y += f.vy * dt; }
+    }
+    fx = fx.filter((f) => f.t > 0);
+  },
+  draw() {
+    const m = match, t = m.t;
+    drawField(m.sudden, t);
+    // 조작 안내 (반투명)
+    const km = KEY_PRESETS[keymapName];
+    ctx.globalAlpha = 0.35;
+    textPlain(keyHint(km.p1), CONFIG.midX / 2, H - 20, 20, COLORS[0].dark);
+    if (!vsCPU) textPlain(keyHint(km.p2), CONFIG.midX + (W - CONFIG.midX) / 2, H - 20, 20, COLORS[1].dark);
+    ctx.globalAlpha = 1;
+
+    for (const it of m.items) drawItem(it, t);
+    for (const b of m.balls) drawBall(b);
+    drawPlayer(m.p[0], '1P', t, true);
+    drawPlayer(m.p[1], vsCPU ? 'CPU' : '2P', t, true);
+
+    for (const f of fx) {
+      if (f.kind === 'shard') {
+        ctx.fillStyle = '#fcc419';
+        ctx.save(); ctx.translate(f.x, f.y); ctx.rotate(f.t * 20);
+        ctx.fillRect(-4, -4, 8, 8); ctx.restore();
+      } else if (f.kind === 'ring') {
+        ctx.globalAlpha = f.t / 0.3;
+        ctx.strokeStyle = '#fff'; ctx.lineWidth = 4;
+        ctx.beginPath(); ctx.arc(f.x, f.y, 10 + (0.3 - f.t) * 120, 0, Math.PI * 2); ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+    }
+    drawHud(m, t);
+    for (const f of fx) {
+      if (f.kind !== 'heart') continue;
+      const p = 1 - f.t / 0.6;
+      ctx.globalAlpha = 1 - p;
+      drawHeartShape(f.x - 8 - p * 14, f.y + p * 30, 14, '#fa5252');
+      drawHeartShape(f.x + 8 + p * 14, f.y + p * 30, 14, '#fa5252');
+      ctx.globalAlpha = 1;
+    }
+    if (m.phase === 'intro') {
+      rect(0, CONFIG.fieldTop, W, H - CONFIG.fieldTop, 'rgba(0,0,0,0.3)');
+      text('서든데스!', W / 2, H / 2 - 20, 80, '#ff6b6b');
+      text('먼저 맞히면 이겨요', W / 2, H / 2 + 50, 32, '#fff');
+    }
+    if (m.t < 3 && !m.sudden) {
+      text('위·아래 키를 누른 채 던지면 비스듬히!', W / 2, CONFIG.fieldTop + 40, 24, '#495057');
+    }
+  },
+};
+
+function ResultScene(m) {
+  const w = m.winner;
+  if (w === 'draw') { /* 연승 유지 */ }
+  else if (streak.who === w) streak.n++;
+  else streak = { who: w, n: 1 };
+  const name = (id) => (id === 1 && vsCPU ? '컴퓨터' : `${id + 1}P`);
+  return {
+    name: 'RESULT',
+    idle: true,
+    update() {
+      if (sceneTime < 1) return;
+      if (pressed.KeyR) { sfx.select(); setScene(CountdownScene(PlayScene)); return; }
+      if (tapped('Escape', CORE.escHold)) { goTitle(); return; }
+      if (performance.now() - lastInput > CONFIG.resultIdle * 1000) goTitle();
+    },
+    draw() {
+      const t = sceneTime;
+      drawField(false, t);
+      rect(0, 0, W, CONFIG.fieldTop, '#212529');
+      rect(0, 0, W, H, 'rgba(0,0,0,0.35)');
+      if (w === 'draw') {
+        text('무승부', W / 2, 140, 96, '#fff');
+        drawPlayer({ id: 0, x: W / 2 - 110, y: 250, facing: 1, inv: 0, shield: 0, flash: 0, cool: 0 }, '1P', t, false);
+        drawPlayer({ id: 1, x: W / 2 + 62, y: 250, facing: -1, inv: 0, shield: 0, flash: 0, cool: 0 }, vsCPU ? 'CPU' : '2P', t, false);
+      } else {
+        text(`${name(w)} 승리!`, W / 2, 140, 96, COLORS[w].main);
+        const bounce = Math.abs(Math.sin(t * 6)) * 40;
+        drawPlayer({ id: w, x: W / 2 - PS / 2, y: 290 - bounce, facing: w === 0 ? 1 : -1, inv: 0, shield: 0, flash: 0, cool: 0 },
+          w === 1 && vsCPU ? 'CPU' : `${w + 1}P`, t, false);
+        if (streak.n >= 2) text(`${name(w)} ${streak.n}연승!`, W / 2, 380, 40, '#ffe066');
+      }
+      if (t > 1) {
+        text('R 다시 하기', W / 2 - 150, 470, 34, '#fff');
+        text('Esc 처음으로', W / 2 + 150, 470, 34, '#fff');
+      }
+    },
+  };
+}
+
+// ============================================================
+// 자동 검증 (콘솔: testFlow(), simMatch())
+// ============================================================
+const NONE = { up: false, down: false, left: false, right: false, fire: false };
+
+// 각 승패 경우를 강제로 만들어 끝까지 가는지
+function testFlow() {
+  const DT = 1 / 60;
+  const res = {};
+  const ballAt = (m, owner, p) => m.balls.push({ x: p.x + PS / 2, y: p.y + PS / 2, vx: 0, vy: 0, owner, age: 1, trail: [] });
+  // 즉시 승리
+  let m = newMatch(); m.p[1].lives = 1; ballAt(m, 0, m.p[1]); stepMatch(m, DT, [NONE, NONE]);
+  res.immediate = m.phase === 'over' && m.winner === 0;
+  // 시간 종료 승리
+  m = newMatch(); m.p[0].lives = 2; m.timeLeft = 0.01; stepMatch(m, DT, [NONE, NONE]);
+  res.timeWin = m.phase === 'over' && m.winner === 1;
+  // 시간 종료 동점 → 서든데스 → 승리
+  m = newMatch(); m.timeLeft = 0.01; stepMatch(m, DT, [NONE, NONE]);
+  const toSudden = m.phase === 'intro' && m.p[0].lives === 1 && m.balls.length === 0;
+  for (let i = 0; i < 70; i++) stepMatch(m, DT, [NONE, NONE]);
+  const inSudden = m.phase === 'sudden';
+  ballAt(m, 1, m.p[0]); stepMatch(m, DT, [NONE, NONE]);
+  res.suddenWin = toSudden && inSudden && m.phase === 'over' && m.winner === 1;
+  // 서든데스 무승부
+  m = newMatch(); m.timeLeft = 0.01; stepMatch(m, DT, [NONE, NONE]);
+  let n = 0; while (m.phase !== 'over' && n++ < 60 * 20) stepMatch(m, DT, [NONE, NONE]);
+  res.suddenDraw = m.phase === 'over' && m.winner === 'draw' && Math.abs(m.t - (CONFIG.suddenIntro + CONFIG.suddenTime)) < 0.1;
+  // 같은 프레임 둘 다 0 → 서든데스
+  m = newMatch(); m.p[0].lives = 1; m.p[1].lives = 1; ballAt(m, 1, m.p[0]); ballAt(m, 0, m.p[1]); stepMatch(m, DT, [NONE, NONE]);
+  res.bothZero = m.phase === 'intro' && m.sudden;
+  // 무적 중엔 통과
+  m = newMatch(); m.p[1].inv = 0.5; ballAt(m, 0, m.p[1]); stepMatch(m, DT, [NONE, NONE]);
+  res.invulnPass = m.p[1].lives === 3 && m.balls.length === 1;
+  // 빠른 공끼리 뚫고 지나가지 않음 (dt 0.05)
+  m = newMatch();
+  m.balls.push({ x: 470, y: 300, vx: 520, vy: 0, owner: 0, age: 1, trail: [] }, { x: 500, y: 300, vx: -520, vy: 0, owner: 1, age: 1, trail: [] });
+  stepMatch(m, 0.05, [NONE, NONE]);
+  res.noTunnel = m.balls.length === 0;
+  // 대각선 속도
+  m = newMatch(); const x0 = m.p[0].x, y0 = m.p[0].y;
+  stepMatch(m, 0.1, [{ ...NONE, right: true, down: true }, NONE]);
+  res.diagSpeed = Math.round(Math.hypot(m.p[0].x - x0, m.p[0].y - y0));
+  return res;
+}
+
+function simMatch(n = 500, opts = {}) {
+  const DT = 1 / 60;
+  const saveItem = CONFIG.item.enabled;
+  if (opts.items !== undefined) CONFIG.item.enabled = opts.items;
+  let hits = 0, sudden = 0, draws = 0, w0 = 0, w1 = 0, time = 0;
+  for (let i = 0; i < n; i++) {
+    const m = newMatch();
+    const mem = [{}, {}];
+    const bot = opts.ai ? [humanBot, aiInput] : [humanBot, humanBot];
+    while (m.phase !== 'over') stepMatch(m, DT, [bot[0](m, 0, mem[0], DT), bot[1](m, 1, mem[1], DT)]);
+    hits += m.hits; time += m.t;
+    if (m.sudden) sudden++;
+    if (m.winner === 'draw') draws++; else if (m.winner === 0) w0++; else w1++;
+  }
+  CONFIG.item.enabled = saveItem;
+  return {
+    n, hitsPerMatch: +(hits / n).toFixed(2), suddenPct: +(sudden / n * 100).toFixed(1),
+    drawPct: +(draws / n * 100).toFixed(1), win1P: +(w0 / n * 100).toFixed(1), win2P: +(w1 / n * 100).toFixed(1),
+    avgSeconds: +(time / n).toFixed(1),
+  };
+}
+
+start(TitleScene);
+</script>
+</body>
+</html>

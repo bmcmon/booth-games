@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<link rel="icon" href="data:,">
+<title>부스 게임</title>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="core.js"></script>
+<script>
+'use strict';
+// 런처 (00-core-plan.md §5)
+CORE.isLauncher = true;
+
+const GAMES = [
+  { file: 'fruit.html',  title: '과일 받기', tag: '초등 추천', tagColor: '#40c057', color: '#fff4e6' },
+  { file: 'shooter.html', title: '우주 방위대', tag: '보스를 잡아라', tagColor: '#e64980', color: '#e5dbff' },
+  { file: 'versus.html', title: '2인 대전',  tag: '두 명이서', tagColor: '#7950f2', color: '#f3f0ff' },
+];
+const CARD_W = 270, CARD_H = 330, CARD_GAP = 30, CARD_Y = 120;
+const cardX = (i) => (W - (CARD_W * 3 + CARD_GAP * 2)) / 2 + i * (CARD_W + CARD_GAP);
+const TEST_LINK = { x: W / 2 - 90, y: H - 44, w: 180, h: 28 };
+
+let sel = 0;
+let leaving = -1, leaveT = 0;
+let lift = [0, 0, 0];
+
+// 배경에서 천천히 떠다니는 도형 캐릭터
+const floaters = Array.from({ length: 9 }, (_, i) => ({
+  x: rand(0, W), y: rand(80, H - 40), r: rand(10, 22),
+  vx: rand(12, 30) * (i % 2 ? 1 : -1), ph: rand(0, 6),
+  color: pick(['#ffc9c9', '#ffec99', '#b2f2bb', '#a5d8ff', '#d0bfff']),
+}));
+
+function go(i) {
+  if (leaving >= 0) return;
+  leaving = i;
+  leaveT = 0;
+  sfx.go();
+}
+
+const Launcher = {
+  name: 'LAUNCHER',
+  idle: true,
+  update(dt) {
+    if (leaving >= 0) {
+      leaveT += dt;
+      if (leaveT > 0.25) location.href = GAMES[leaving].file;
+      return;
+    }
+    let hover = -1;
+    GAMES.forEach((g, i) => { if (mouseIn(cardX(i), CARD_Y, CARD_W, CARD_H)) hover = i; });
+    if (hover >= 0 && hover !== sel) sel = hover;
+    const overLink = mouseIn(TEST_LINK.x, TEST_LINK.y, TEST_LINK.w, TEST_LINK.h);
+    canvas.style.cursor = hover >= 0 || overLink ? 'pointer' : 'default';
+
+    if (pressed.ArrowLeft) { sel = (sel + 2) % 3; sfx.select(); }
+    if (pressed.ArrowRight) { sel = (sel + 1) % 3; sfx.select(); }
+    if (pressed.Enter || pressed.NumpadEnter || pressed.Space) go(sel);
+    if (pressed.Digit1 || pressed.Numpad1) go(0);
+    if (pressed.Digit2 || pressed.Numpad2) go(1);
+    if (pressed.Digit3 || pressed.Numpad3) go(2);
+    if (pressed.Mouse0 && hover >= 0) go(hover);
+
+    if (pressed.KeyT || (pressed.Mouse0 && overLink)) location.href = 'keytest.html';
+
+    for (const f of floaters) {
+      f.x += f.vx * dt;
+      if (f.x < -40) f.x = W + 40;
+      if (f.x > W + 40) f.x = -40;
+    }
+    for (let i = 0; i < 3; i++) lift[i] = lerp(lift[i], i === sel ? 1 : 0, Math.min(1, dt * 12));
+  },
+  draw() {
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, '#4dabf7');
+    g.addColorStop(1, '#d0ebff');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+
+    for (const f of floaters) {
+      const y = f.y + Math.sin(sceneTime * 1.2 + f.ph) * 8;
+      circle(f.x, y, f.r, f.color);
+      circle(f.x - f.r * 0.3, y - f.r * 0.15, f.r * 0.18, '#fff');
+      circle(f.x + f.r * 0.3, y - f.r * 0.15, f.r * 0.18, '#fff');
+      circle(f.x - f.r * 0.3, y - f.r * 0.15, f.r * 0.08, '#212529');
+      circle(f.x + f.r * 0.3, y - f.r * 0.15, f.r * 0.08, '#212529');
+    }
+
+    text('게임을 골라 주세요!', W / 2, 52, 44, '#fff');
+    text('숫자 1 · 2 · 3 을 누르거나 마우스로 클릭', W / 2, 96, 20, '#fff');
+
+    GAMES.forEach((game, i) => drawCard(i, game));
+
+    const on = mouseIn(TEST_LINK.x, TEST_LINK.y, TEST_LINK.w, TEST_LINK.h);
+    textPlain('키 테스트 (T)', W / 2, TEST_LINK.y + 14, 15, on ? '#1864ab' : '#495057');
+    textPlain('M 소리 켜기/끄기', W - 70, H - 16, 13, '#495057');
+    if (!storageOK) {
+      text('주의: 순위가 저장되지 않습니다 (시크릿 창이면 일반 창으로 열어 주세요)', W / 2, H - 70, 18, '#ff8787');
+    }
+
+    if (leaving >= 0) rect(0, 0, W, H, `rgba(0,0,0,${Math.min(1, leaveT / 0.25)})`);
+  },
+};
+
+function drawCard(i, game) {
+  const x = cardX(i), y = CARD_Y - lift[i] * 8;
+  const chosen = i === sel;
+  roundRect(x + 4, y + 8, CARD_W, CARD_H, 20, 'rgba(0,0,0,0.18)');
+  roundRect(x, y, CARD_W, CARD_H, 20, game.color, chosen ? '#fab005' : '#fff', chosen ? 6 : 3);
+
+  // 번호
+  circle(x + 32, y + 32, 20, '#212529');
+  textPlain(String(i + 1), x + 32, y + 33, 24, '#fff');
+
+  textPlain(game.title, x + CARD_W / 2 + 14, y + 34, 32, '#212529');
+  const tw = textWidth(game.tag, 16) + 24;
+  roundRect(x + CARD_W / 2 - tw / 2, y + 60, tw, 26, 13, game.tagColor);
+  textPlain(game.tag, x + CARD_W / 2, y + 74, 16, '#fff');
+
+  // 그림 영역
+  ctx.save();
+  roundPath(x + 16, y + 98, CARD_W - 32, 130, 12);
+  ctx.clip();
+  rect(x + 16, y + 98, CARD_W - 32, 130, '#ffffff');
+  [drawFruitArt, drawShooterArt, drawVersusArt][i](x + 16, y + 98, CARD_W - 32, 130);
+  ctx.restore();
+
+  // 조작 키
+  const ky = y + 248;
+  if (i === 0) {
+    keyCap(x + CARD_W / 2 - 64, ky, 56, 48, '←', false);
+    keyCap(x + CARD_W / 2 + 8, ky, 56, 48, '→', false);
+  } else if (i === 1) {
+    keyCap(x + 22, ky, 104, 48, '방향키', false, 18);
+    keyCap(x + CARD_W - 126, ky, 104, 48, 'Space', false, 18);
+  } else {
+    keyCap(x + 22, ky, 104, 48, 'WASD+F', false, 18);
+    keyCap(x + CARD_W - 126, ky, 104, 48, '방향키+Enter', false, 14);
+  }
+  textPlain(i === 0 ? '바구니 움직이기' : i === 1 ? '총은 자동 · Space 폭탄' : '1P 왼쪽 · 2P 오른쪽',
+    x + CARD_W / 2, y + CARD_H - 16, 15, '#495057');
+}
+
+// --- 카드 그림 (게임과 같은 도형 언어) ---
+function drawApple(x, y, r) {
+  circle(x, y, r, '#fa5252');
+  ctx.strokeStyle = '#7f5539'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(x, y - r); ctx.lineTo(x + 2, y - r - 7); ctx.stroke();
+  ctx.fillStyle = '#40c057';
+  ctx.beginPath(); ctx.ellipse(x + 7, y - r - 4, 6, 3, -0.5, 0, Math.PI * 2); ctx.fill();
+  circle(x - r * 0.4, y - r * 0.35, r * 0.18, '#fff');
+}
+
+function drawFruitArt(x, y, w, h) {
+  rect(x, y, w, h, '#d0ebff');
+  rect(x, y + h - 16, w, 16, '#69db7c');
+  const t = sceneTime;
+  const fy = y + ((t * 70) % (h - 30));
+  drawApple(x + w * 0.5 + Math.sin(t) * 20, fy, 13);
+  // 폭탄
+  const by = y + ((t * 70 + 60) % (h - 30));
+  circle(x + w * 0.22, by, 12, '#212529');
+  if (Math.floor(t * 8) % 2) circle(x + w * 0.22 + 4, by - 15, 4, '#ff922b');
+  // 바구니
+  const bx = x + w * 0.5 + Math.sin(t) * 20;
+  ctx.fillStyle = '#a0522d';
+  ctx.beginPath();
+  ctx.moveTo(bx - 36, y + h - 40); ctx.lineTo(bx + 36, y + h - 40);
+  ctx.lineTo(bx + 28, y + h - 18); ctx.lineTo(bx - 28, y + h - 18);
+  ctx.closePath(); ctx.fill();
+  rect(bx - 32, y + h - 33, 64, 2, '#7f3f1d');
+  rect(bx - 30, y + h - 26, 60, 2, '#7f3f1d');
+}
+
+function drawShooterArt(x, y, w, h) {
+  rect(x, y, w, h, '#1d1b4f');
+  const t = sceneTime;
+  for (let i = 0; i < 16; i++) {
+    const sx = x + ((i * 53) % w), sy = y + ((i * 37 + t * 60) % h);
+    rect(sx, sy, 2, 3, '#a5d8ff');
+  }
+  // 보스 원반
+  const bx = x + w / 2 + Math.sin(t * 0.9) * 50, by = y + 30;
+  ctx.fillStyle = '#862e9c';
+  ctx.beginPath(); ctx.ellipse(bx, by - 4, 18, 14, 0, Math.PI, 0); ctx.fill();
+  ctx.fillStyle = '#a61e4d';
+  ctx.beginPath(); ctx.ellipse(bx, by + 2, 38, 12, 0, 0, Math.PI * 2); ctx.fill();
+  circle(bx - 6, by - 8, 3, '#fff'); circle(bx + 6, by - 8, 3, '#fff');
+  // 보스 탄
+  for (let i = 0; i < 8; i++) {
+    const a = (i * Math.PI) / 4 + t, r = ((t * 40) % 60) + 20;
+    circle(bx + Math.cos(a) * r, by + 10 + Math.sin(a) * r * 0.7, 3, '#f783ac');
+  }
+  // 우주선과 총알
+  const sx = x + w / 2 + Math.sin(t * 1.7) * 70, sy = y + h - 26;
+  for (let i = 0; i < 4; i++) {
+    const ly = sy - 20 - ((t * 300 + i * 25) % 90);
+    rect(sx - 1.5, ly, 3, 8, '#66d9e8');
+  }
+  ctx.fillStyle = '#4dabf7';
+  ctx.beginPath(); ctx.moveTo(sx, sy - 4); ctx.lineTo(sx - 13, sy + 9); ctx.lineTo(sx + 13, sy + 9); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#e7f5ff';
+  ctx.beginPath(); ctx.moveTo(sx, sy - 14); ctx.lineTo(sx + 5, sy + 9); ctx.lineTo(sx - 5, sy + 9); ctx.closePath(); ctx.fill();
+  circle(sx, sy + 13, 3, '#ff922b');
+}
+
+function drawBlob(x, y, color, dark, dir, label) {
+  roundRect(x, y, 40, 40, 10, color, dark, 2);
+  circle(x + 20 + dir * 6, y + 14, 5, '#fff');
+  circle(x + 20 + dir * 6 + dir * 2, y + 14, 2.5, '#212529');
+  textPlain(label, x + 20, y + 29, 12, '#fff');
+}
+
+function drawVersusArt(x, y, w, h) {
+  rect(x, y, w / 2, h, '#e7f5ff');
+  rect(x + w / 2, y, w / 2, h, '#fff5f5');
+  ctx.setLineDash([6, 6]);
+  ctx.strokeStyle = '#adb5bd'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(x + w / 2, y); ctx.lineTo(x + w / 2, y + h); ctx.stroke();
+  ctx.setLineDash([]);
+  const t = sceneTime;
+  const y1 = y + 45 + Math.sin(t * 1.7) * 25;
+  const y2 = y + 45 + Math.sin(t * 1.3 + 2) * 25;
+  drawBlob(x + 14, y1, '#339af0', '#1864ab', 1, '1P');
+  drawBlob(x + w - 54, y2, '#ff6b6b', '#c92a2a', -1, '2P');
+  const p = (t * 0.8) % 1;
+  const bx = lerp(x + 60, x + w - 60, p);
+  const by = lerp(y1 + 20, y2 + 20, p);
+  circle(bx, by, 7, '#339af0');
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(bx, by, 7, 0, Math.PI * 2); ctx.stroke();
+}
+
+start(Launcher);
+</script>
+</body>
+</html>
