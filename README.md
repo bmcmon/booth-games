@@ -9,7 +9,7 @@
 | 3 | 2인 대전 | 1P `W` `A` `S` `D` + `F` / 2P 방향키 + `Enter` (`0` 컴퓨터와 대전) |
 
 ## 실행
-- **온라인**: 이 저장소의 GitHub Pages 주소에서 바로 플레이
+- **온라인**: https://bmcmon.github.io/booth-games/ 에서 바로 플레이
 - **오프라인(부스)**: 저장소를 내려받아 `index.html`을 Chrome으로 열고 `F11`
 
 운영자 단축키·키보드 점검·난이도 조정은 [README.txt](README.txt)를 보세요.
