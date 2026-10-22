@@ -243,16 +243,11 @@ function keyName(code) {
   return code;
 }
 
-// 2인 대전 키맵 프리셋 (03-versus-plan.md §3). keytest.html과 versus.html이 함께 사용
-const KEY_PRESETS = {
-  A: { p1: { up: 'KeyW', left: 'KeyA', down: 'KeyS', right: 'KeyD', fire: ['KeyF'] },
-       p2: { up: 'ArrowUp', left: 'ArrowLeft', down: 'ArrowDown', right: 'ArrowRight', fire: ['Enter', 'NumpadEnter'] } },
-  B: { p1: { up: 'KeyW', left: 'KeyA', down: 'KeyS', right: 'KeyD', fire: ['KeyQ'] },
-       p2: { up: 'ArrowUp', left: 'ArrowLeft', down: 'ArrowDown', right: 'ArrowRight', fire: ['ShiftRight'] } },
-  C: { p1: { up: 'KeyW', left: 'KeyA', down: 'KeyS', right: 'KeyD', fire: ['KeyF'] },
-       p2: { up: 'KeyU', left: 'KeyH', down: 'KeyJ', right: 'KeyK', fire: ['KeyL'] } },
+// 2인 대전 키 (keytest.html과 versus.html이 함께 사용)
+const VERSUS_KEYS = {
+  p1: { up: 'KeyW', left: 'KeyA', down: 'KeyS', right: 'KeyD', fire: ['KeyF'] },
+  p2: { up: 'KeyU', left: 'KeyH', down: 'KeyJ', right: 'KeyK', fire: ['KeyL'] },
 };
-const VERSUS_KEYMAP_KEY = 'booth_versus_keymap';   // 값: 'A' | 'B' | 'C'
 
 // ============================================================
 // 소리 (Web Audio로 생성)

@@ -14,60 +14,37 @@
 // 시험 조합: 1P 위·오른쪽·던지기 + 2P 위·왼쪽·던지기 (서로 다가가며 던지는 상황)
 
 const PASS_KEY = 'booth_keytest';
-let preset = 'A';
-let passed = {};
+let passed = false;
 let maxCount = 0;
 let passFlash = 0;
-let savedMap = 'A';
 
-try { passed = JSON.parse(localStorage.getItem(PASS_KEY)) || {}; } catch (e) { passed = {}; }
-try { savedMap = localStorage.getItem(VERSUS_KEYMAP_KEY) || 'A'; } catch (e) { /* 무시 */ }
+try { passed = localStorage.getItem(PASS_KEY) === '1'; } catch (e) { passed = false; }
 
-function combo(name) {
-  const m = KEY_PRESETS[name];
-  return {
-    p1: [[m.p1.up], [m.p1.right], m.p1.fire],
-    p2: [[m.p2.up], [m.p2.left], m.p2.fire],
-  };
-}
+const m = VERSUS_KEYS;
+const combo = {
+  p1: [[m.p1.up], [m.p1.right], m.p1.fire],
+  p2: [[m.p2.up], [m.p2.left], m.p2.fire],
+};
 
 const isOn = (codes) => codes.some((c) => keys[c]);
-
-const BTN_Y = 300, BTN_W = 150, BTN_H = 46;
-const btnX = (i) => W / 2 - (BTN_W * 3 + 20 * 2) / 2 + i * (BTN_W + 20);
-const SAVE_BTN = { x: W / 2 - 150, y: 494, w: 300, h: 36 };
 
 const TestScene = {
   name: 'KEYTEST',
   idle: true,
   update(dt) {
-    ['A', 'B', 'C'].forEach((p, i) => {
-      if (clickIn(btnX(i), BTN_Y, BTN_W, BTN_H)) { preset = p; sfx.select(); }
-    });
-    if (pressed.Digit1) preset = 'A';
-    if (pressed.Digit2) preset = 'B';
-    if (pressed.Digit3) preset = 'C';
-
     const count = Object.keys(keys).filter((c) => keys[c]).length;
     maxCount = Math.max(maxCount, count);
 
-    const cb = combo(preset);
-    const all = [...cb.p1, ...cb.p2].every(isOn);
-    if (all && !passed[preset]) {
-      passed[preset] = true;
+    const all = [...combo.p1, ...combo.p2].every(isOn);
+    if (all && !passed) {
+      passed = true;
       passFlash = 1.5;
       sfx.win();
-      try { localStorage.setItem(PASS_KEY, JSON.stringify(passed)); } catch (e) { /* 무시 */ }
+      try { localStorage.setItem(PASS_KEY, '1'); } catch (e) { /* 무시 */ }
     }
     if (passFlash > 0) passFlash -= dt;
 
-    const s = SAVE_BTN;
-    if (passed[preset] && clickIn(s.x, s.y, s.w, s.h)) {
-      savedMap = preset;
-      try { localStorage.setItem(VERSUS_KEYMAP_KEY, preset); } catch (e) { /* 무시 */ }
-      sfx.coin();
-    }
-    if (clickIn(W - 130, 4, 120, 30)) { sfx.select(); maxCount = 0; passed = {}; try { localStorage.removeItem(PASS_KEY); } catch (e) { /* 무시 */ } }
+    if (clickIn(W - 130, 4, 120, 30)) { sfx.select(); maxCount = 0; passed = false; try { localStorage.removeItem(PASS_KEY); } catch (e) { /* 무시 */ } }
   },
   draw() {
     rect(0, 0, W, H, '#1e1e2e');
@@ -90,36 +67,21 @@ const TestScene = {
     text(`동시 ${held.length}개`, W / 2, 226, 64, held.length >= 6 ? '#69db7c' : '#ffd43b');
     textPlain(`최대 ${maxCount}개`, W / 2, 276, 18, '#adb5bd');
 
-    // 프리셋 버튼
-    ['A', 'B', 'C'].forEach((p, i) => {
-      const bx = btnX(i);
-      const sel = p === preset;
-      roundRect(bx, BTN_Y, BTN_W, BTN_H, 10, sel ? '#4dabf7' : '#343a40', sel ? '#fff' : '#495057', 2);
-      textPlain(`${i + 1}  프리셋 ${p}${passed[p] ? '  합격' : ''}`, bx + BTN_W / 2, BTN_Y + BTN_H / 2, 18,
-        passed[p] ? '#b2f2bb' : '#fff');
-    });
-
     // 1P / 2P 가이드 박스
-    const cb = combo(preset);
-    drawGuide(70, 370, '1P', '#4dabf7', cb.p1);
-    drawGuide(W / 2 + 30, 370, '2P', '#ff6b6b', cb.p2);
+    drawGuide(70, 370, '1P', '#4dabf7', combo.p1);
+    drawGuide(W / 2 + 30, 370, '2P', '#ff6b6b', combo.p2);
 
-    const ok = [...cb.p1, ...cb.p2].every(isOn);
+    const ok = [...combo.p1, ...combo.p2].every(isOn);
     if (ok || passFlash > 0) {
       text('합격!', W / 2, 340, 34, '#69db7c');
     }
 
-    // 대전 기본 키맵 저장
-    const s = SAVE_BTN;
-    if (passed[preset]) {
-      const on = mouseIn(s.x, s.y, s.w, s.h);
-      roundRect(s.x, s.y, s.w, s.h, 8, on ? '#2b8a3e' : '#2f9e44');
-      textPlain(savedMap === preset ? `대전 기본 키맵: ${preset} (저장됨)` : `프리셋 ${preset}을 대전 기본으로 저장`,
-        W / 2, s.y + s.h / 2, 17, '#fff');
+    if (passed) {
+      textPlain('이 키보드에서 6키 동시 입력 합격', W / 2, 512, 17, '#b2f2bb');
     } else {
-      textPlain('여섯 칸이 모두 초록이면 합격 · 모두 실패하면 대전용 외장 키보드 준비', W / 2, s.y + s.h / 2, 16, '#adb5bd');
+      textPlain('여섯 칸이 모두 초록이면 합격 · 실패하면 대전용 외장 키보드 준비', W / 2, 512, 16, '#adb5bd');
     }
-    textPlain(`현재 대전 키맵 ${savedMap} · Esc 2초: 처음 화면`, W / 2, H - 8, 13, '#6c757d');
+    textPlain('Esc 2초: 처음 화면', W / 2, H - 8, 13, '#6c757d');
   },
 };
 

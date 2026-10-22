@@ -311,10 +311,8 @@ function humanBot(m, id, mem, dt) {
 }
 
 // ============================================================
-// 입력 (키맵 프리셋)
+// 입력
 // ============================================================
-let keymapName = 'A';
-try { const s = localStorage.getItem(VERSUS_KEYMAP_KEY); if (KEY_PRESETS[s]) keymapName = s; } catch (e) { /* 무시 */ }
 let vsCPU = false;
 
 function readKeys(km) {
@@ -441,9 +439,6 @@ const TitleScene = {
   name: 'TITLE',
   idle: true,
   update() {
-    if (pressed.Digit1 || pressed.Numpad1) setKeymap('A');
-    if (pressed.Digit2 || pressed.Numpad2) setKeymap('B');
-    if (pressed.Digit3 || pressed.Numpad3) setKeymap('C');
     if (pressed.Space || pressed.Enter || pressed.NumpadEnter) startMatch(false);
     else if (pressed.Digit0 || pressed.Numpad0) startMatch(true);
   },
@@ -454,9 +449,8 @@ const TitleScene = {
     text('2인 대전', W / 2, 32, 34, '#fff');
     textPlain('공을 던져서 상대를 3번 먼저 맞히면 이겨요!', W / 2, 100, 26, '#212529');
 
-    const km = KEY_PRESETS[keymapName];
-    drawKeyGuide(60, 150, '1P', 0, km.p1, keys);
-    drawKeyGuide(W / 2 + 40, 150, '2P', 1, km.p2, keys);
+    drawKeyGuide(60, 150, '1P', 0, VERSUS_KEYS.p1, keys);
+    drawKeyGuide(W / 2 + 40, 150, '2P', 1, VERSUS_KEYS.p2, keys);
 
     const bob = Math.sin(t * 3) * 6;
     drawPlayer({ id: 0, x: 190, y: 380 + bob, facing: 1, inv: 0, shield: 0, flash: 0, cool: 0 }, '1P', t, false);
@@ -465,14 +459,8 @@ const TitleScene = {
     drawBall({ owner: Math.floor(t * 0.7) % 2, x: Math.floor(t * 0.7) % 2 ? lerp(W - 260, 260, p) : lerp(260, W - 260, p), y: 404, trail: [] });
 
     if (Math.floor(t * 2) % 2 === 0) text('둘이 같이 Space 또는 Enter!', W / 2, 360, 34, '#f76707');
-    textPlain('키맵', W / 2 - 230, 505, 18, '#495057');
-    ['A', 'B', 'C'].forEach((k, i) => {
-      const x = W / 2 - 190 + i * 90, sel = k === keymapName;
-      roundRect(x, 488, 80, 34, 8, sel ? '#339af0' : '#dee2e6', sel ? '#1864ab' : '#adb5bd', 2);
-      textPlain(`${i + 1} ${k}`, x + 40, 505, 18, sel ? '#fff' : '#495057');
-    });
-    roundRect(W / 2 + 90, 488, 170, 34, 8, '#fff3bf', '#f59f00', 2);
-    textPlain('0  컴퓨터와 하기', W / 2 + 175, 505, 17, '#e67700');
+    roundRect(W / 2 - 85, 488, 170, 34, 8, '#fff3bf', '#f59f00', 2);
+    textPlain('0  컴퓨터와 하기', W / 2, 505, 17, '#e67700');
   },
 };
 
@@ -489,12 +477,6 @@ function drawKeyGuide(x, y, who, id, km, held) {
   textPlain('던지기', x + 310, y + 34, 18, '#495057');
   const f = keyName(km.fire[0]);
   keyCap(x + 260, by + 20, 100, 60, f, km.fire.some((k) => held[k]), f.length > 5 ? 15 : 22);
-}
-
-function setKeymap(k) {
-  keymapName = k;
-  sfx.select();
-  try { localStorage.setItem(VERSUS_KEYMAP_KEY, k); } catch (e) { /* 무시 */ }
 }
 
 let streak = { who: null, n: 0 };   // 연승 기록
@@ -515,9 +497,8 @@ const PlayScene = {
   idle: false,
   enter() { match = newMatch(); fx = []; aiMem = {}; },
   update(dt) {
-    const km = KEY_PRESETS[keymapName];
-    const in1 = readKeys(km.p1);
-    const in2 = vsCPU ? aiInput(match, 1, aiMem, dt) : readKeys(km.p2);
+    const in1 = readKeys(VERSUS_KEYS.p1);
+    const in2 = vsCPU ? aiInput(match, 1, aiMem, dt) : readKeys(VERSUS_KEYS.p2);
     stepMatch(match, dt, [in1, in2]);
 
     for (const e of match.events) {
@@ -557,10 +538,9 @@ const PlayScene = {
     const m = match, t = m.t;
     drawField(m.sudden, t);
     // 조작 안내 (반투명)
-    const km = KEY_PRESETS[keymapName];
     ctx.globalAlpha = 0.35;
-    textPlain(keyHint(km.p1), CONFIG.midX / 2, H - 20, 20, COLORS[0].dark);
-    if (!vsCPU) textPlain(keyHint(km.p2), CONFIG.midX + (W - CONFIG.midX) / 2, H - 20, 20, COLORS[1].dark);
+    textPlain(keyHint(VERSUS_KEYS.p1), CONFIG.midX / 2, H - 20, 20, COLORS[0].dark);
+    if (!vsCPU) textPlain(keyHint(VERSUS_KEYS.p2), CONFIG.midX + (W - CONFIG.midX) / 2, H - 20, 20, COLORS[1].dark);
     ctx.globalAlpha = 1;
 
     for (const it of m.items) drawItem(it, t);
