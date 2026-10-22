@@ -630,7 +630,7 @@ const TitleScene = {
 
     roundRect(510, 205, 300, 170, 18, 'rgba(255,255,255,0.12)', '#74c0fc', 2);
     text('총은 자동 발사!', 660, 240, 28, '#66d9e8');
-    keyCap(575, 272, 170, 46, 'Space', keys.Space, 20);
+    keyCap(575, 272, 170, 46, 'F', keys.KeyF, 20);
     text('위급할 때 폭탄', 660, 350, 24, '#ffa94d');
 
     textPlain('가운데 분홍 점에만 맞아요', W / 2, 410, 20, '#f783ac');
@@ -653,7 +653,7 @@ const PlayScene = {
     if (!g.end) {
       const dx = ((keys.ArrowRight || keys.KeyD) ? 1 : 0) - ((keys.ArrowLeft || keys.KeyA) ? 1 : 0);
       const dy = ((keys.ArrowDown || keys.KeyS) ? 1 : 0) - ((keys.ArrowUp || keys.KeyW) ? 1 : 0);
-      stepGame(g, dt, { dx, dy, bomb: !!pressed.Space });
+      stepGame(g, dt, { dx, dy, bomb: !!pressed.KeyF });
     } else {
       g.endT = (g.endT || 0) + dt;
       if (g.endT > 2.2) { setScene(ResultScene(g)); return; }
