@@ -250,7 +250,7 @@ const KEY_PRESETS = {
   B: { p1: { up: 'KeyW', left: 'KeyA', down: 'KeyS', right: 'KeyD', fire: ['KeyQ'] },
        p2: { up: 'ArrowUp', left: 'ArrowLeft', down: 'ArrowDown', right: 'ArrowRight', fire: ['ShiftRight'] } },
   C: { p1: { up: 'KeyW', left: 'KeyA', down: 'KeyS', right: 'KeyD', fire: ['KeyF'] },
-       p2: { up: 'KeyI', left: 'KeyJ', down: 'KeyK', right: 'KeyL', fire: ['Semicolon'] } },
+       p2: { up: 'KeyU', left: 'KeyH', down: 'KeyJ', right: 'KeyK', fire: ['KeyL'] } },
 };
 const VERSUS_KEYMAP_KEY = 'booth_versus_keymap';   // 값: 'A' | 'B' | 'C'
 
